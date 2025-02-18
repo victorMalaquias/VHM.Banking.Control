@@ -1,0 +1,6 @@
+@VHM.Banking.Control_HostAddress = http://localhost:5246
+
+GET {{VHM.Banking.Control_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
