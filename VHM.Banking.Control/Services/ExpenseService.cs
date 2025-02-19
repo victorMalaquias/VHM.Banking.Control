@@ -1,17 +1,13 @@
-﻿using Azure.AI.OpenAI;
-using Azure.Identity;
-using OpenAI.Files;
+﻿using Microsoft.EntityFrameworkCore;
+using OpenAI;
 using OpenAI.Assistants;
-using System.IO;
-using System.Linq;
+using OpenAI.Files;
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
-using System.Threading.Tasks;
-using VHM.Banking.Control.Data;
-using Microsoft.EntityFrameworkCore;
 using VHM.Banking.Control.Data;
 using VHM.Banking.Control.Entities;
 using VHM.Banking.Control.Repositories.Interfaces;
-using System.Globalization;
 
 namespace VHM.Banking.Control.Services
 {
@@ -39,127 +35,111 @@ namespace VHM.Banking.Control.Services
 
         public async Task GenerateGraph(GraphRequest request)
         {
-            var monthNumber = DateTime.ParseExact(request.Month, "MMMM", CultureInfo.InvariantCulture).Month;
-
-            var expenses = await _context.Expenses
-                .Where(e => e.Category == request.Category && e.Date.Month == monthNumber)
-                .ToListAsync();
-
-            if (expenses == null || expenses.Count == 0)
+            try
             {
-                throw new Exception("No expenses found for the given category and month.");
-            }
+                var monthNumber = DateTime.ParseExact(request.Month, "MMMM", CultureInfo.InvariantCulture).Month;
 
-            var expenseData = new
-            {
-                description = $"Expenses for {request.Category} in {request.Month}",
-                expenses = expenses.Select(e => new
+                var expenses = await _context.Expenses
+                    .Where(e => e.Category == request.Category && e.Date.Month == monthNumber)
+                    .ToListAsync();
+
+                if (expenses == null || expenses.Count == 0)
                 {
-                    e.Description,
-                    e.Amount
-                })
-            };
+                    throw new Exception("No expenses found for the given category and month.");
+                }
 
-            string jsonData = JsonSerializer.Serialize(expenseData);
+                var expenseData = new
+                {
+                    description = $"Expenses for {request.Category} in {request.Month}",
+                    expenses = expenses.Select(e => new
+                    {
+                        e.Description,
+                        e.Amount
+                    })
+                };
 
-            var connectionString = "your-azure-openai-endpoint";
-            var azureAIClient = new AzureOpenAIClient(new Uri(connectionString), new DefaultAzureCredential());
+                string jsonData = JsonSerializer.Serialize(expenseData);
+
+                OpenAIClient openAIClient = new("Sua chave de API AQUI");
+
 #pragma warning disable OPENAI001
-            var assistantClient = azureAIClient.GetAssistantClient();
-            var fileClient = azureAIClient.GetOpenAIFileClient();
+                var assistantClient = openAIClient.GetAssistantClient();
+                var fileClient = openAIClient.GetOpenAIFileClient();
 
-            using Stream document = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(jsonData));
+                using Stream document = new MemoryStream(Encoding.UTF8.GetBytes(jsonData));
+                OpenAIFile expenseFile = await fileClient.UploadFileAsync(document, "expense_data.json", FileUploadPurpose.Assistants);
 
-            OpenAIFile expenseFile = await fileClient.UploadFileAsync(
-                document,
-                "expense_data.json",
-                FileUploadPurpose.Assistants);
-
-            var assistantOptions = new AssistantCreationOptions
-            {
-                Name = "Expense Graph Generator",
-                Instructions = "Use the data provided to generate a graph for expenses.",
-                Tools = { new CodeInterpreterToolDefinition() },
-                ToolResources = new()
+                var assistantOptions = new AssistantCreationOptions
                 {
-                    FileSearch = new()
+                    Name = "Expense Graph Generator",
+                    Instructions = "You are an assistant that uses the provided JSON data to generate a graph.  Use the code interpreter tool to generate a graph of the expenses.", // Instrução mais clara
+                    Tools = { new CodeInterpreterToolDefinition() },
+                    ToolResources = new()
                     {
-                        NewVectorStores = { new VectorStoreCreationHelper([expenseFile.Id]) }
-                    }
-                }
-            };
-
-            Assistant assistant = assistantClient.CreateAssistant("gpt-4o", assistantOptions);
-
-            var threadOptions = new ThreadCreationOptions
-            {
-                InitialMessages = { "Generate a graph for the expenses." }
-            };
-
-            ThreadRun threadRun = assistantClient.CreateThreadAndRun(assistant.Id, threadOptions);
-
-            do
-            {
-                await Task.Delay(1000);
-                threadRun = await assistantClient.GetRunAsync(threadRun.ThreadId, threadRun.Id);
-            }
-            while (!threadRun.Status.IsTerminal);
-
-            var messages = assistantClient.GetMessagesAsync(
-                 threadRun.ThreadId,
-                 new MessageCollectionOptions()
-                 {
-                     Order = MessageCollectionOrder.Ascending
-                 });
-
-            await foreach (ThreadMessage message in messages)
-            {
-                Console.Write($"[{message.Role.ToString().ToUpper()}]: ");
-                foreach (MessageContent contentItem in message.Content)
-                {
-                    if (!string.IsNullOrEmpty(contentItem.Text))
-                    {
-                        Console.WriteLine($"{contentItem.Text}");
-
-                        if (contentItem.TextAnnotations.Count > 0)
+                        FileSearch = new()
                         {
-                            Console.WriteLine();
-                        }
-
-                        foreach (TextAnnotation annotation in contentItem.TextAnnotations)
-                        {
-                            if (!string.IsNullOrEmpty(annotation.InputFileId))
+                            NewVectorStores =
                             {
-                                Console.WriteLine($"* File citation, file ID: {annotation.InputFileId}");
-                            }
-                            if (!string.IsNullOrEmpty(annotation.OutputFileId))
-                            {
-                                Console.WriteLine($"* File output, new file ID: {annotation.OutputFileId}");
+                                new VectorStoreCreationHelper([expenseFile.Id]),
                             }
                         }
-                    }
+                    },
+                };
 
-                    if (!string.IsNullOrEmpty(contentItem.ImageFileId))
+                Assistant assistant = await assistantClient.CreateAssistantAsync("gpt-4o", assistantOptions);
+
+                ThreadCreationOptions threadOptions = new()
+                {
+                    InitialMessages = { $"Generate a graph for the expenses in {request.Month} based on the provided file." }
+                };
+
+                ThreadRun threadRun = await assistantClient.CreateThreadAndRunAsync(assistant.Id, threadOptions);
+
+                do
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1));
+                    threadRun = await assistantClient.GetRunAsync(threadRun.ThreadId, threadRun.Id);
+                }
+                while (!threadRun.Status.IsTerminal);
+
+                var messages = assistantClient.GetMessagesAsync(
+                    threadRun.ThreadId,
+                    new MessageCollectionOptions() { Order = MessageCollectionOrder.Ascending });
+
+                await foreach (ThreadMessage message in messages)
+                {
+                    foreach (MessageContent contentItem in message.Content)
                     {
-                        OpenAIFile imageInfo = await fileClient.GetFileAsync(contentItem.ImageFileId);
-                        BinaryData imageBytes = await fileClient.DownloadFileAsync(contentItem.ImageFileId);
+                        if (!string.IsNullOrEmpty(contentItem.Text))
+                        {
+                            Console.WriteLine($"[ASSISTANT]: {contentItem.Text}");
+                        }
 
-                        string directoryPath = @"C:\Users\victo\Desktop\BankingControl\"; 
-                        Directory.CreateDirectory(directoryPath);  
+                        if (!string.IsNullOrEmpty(contentItem.ImageFileId))
+                        {
+                            OpenAIFile imageInfo = await fileClient.GetFileAsync(contentItem.ImageFileId);
+                            BinaryData imageBytes = await fileClient.DownloadFileAsync(contentItem.ImageFileId);
 
-                        string filePath = Path.Combine(directoryPath, $"{imageInfo.Filename}");
+                            string directoryPath = @"C:\Users\victo\Desktop\BankingControl\";
+                            Directory.CreateDirectory(directoryPath);
 
-                        using FileStream stream = File.OpenWrite(filePath);
-                        await imageBytes.ToStream().CopyToAsync(stream);
+                            string filePath = Path.Combine(directoryPath, $"{imageInfo.Filename}");
 
-                        Console.WriteLine($"Image saved to: {filePath}");
+                            using FileStream stream = File.OpenWrite(filePath);
+                            await imageBytes.ToStream().CopyToAsync(stream);
+
+                            Console.WriteLine($"Image saved to: {filePath}");
+                        }
                     }
                 }
-                Console.WriteLine();
             }
-
-
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Erro ao gerar gráfico: {ex.Message}");
+                throw;
+            }
         }
+
 
         public async Task<IEnumerable<Expense>> GetAllExpensesAsync()
         {

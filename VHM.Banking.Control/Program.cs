@@ -1,5 +1,6 @@
 
 using Microsoft.EntityFrameworkCore;
+using OpenAI;
 using VHM.Banking.Control.Data;
 using VHM.Banking.Control.Repositories;
 using VHM.Banking.Control.Repositories.Interfaces;
@@ -17,6 +18,7 @@ namespace VHM.Banking.Control
             builder.Services.AddDbContext<ApplicationDbContext>(options =>
                 options.UseSqlServer(connectionString));
 
+            builder.Services.AddSingleton(new OpenAIClient("Sua chave de API AQUI"));
             builder.Services.AddScoped<IExpenseRepository, ExpenseRepository>();
             builder.Services.AddScoped<ExpenseService>();
 
